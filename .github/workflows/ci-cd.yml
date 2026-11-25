@@ -1,0 +1,123 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: cloud-native-cicd-app
+  TRIVY_VERSION: "0.58.1"
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Test + code quality
+  # ---------------------------------------------------------------
+  test:
+    name: Test & SonarQube
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarQube needs full history
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run unit tests with coverage
+        run: npm test
+
+      - name: SonarQube scan
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        with:
+          projectBaseDir: app
+
+      - name: SonarQube skipped
+        if: ${{ env.SONAR_TOKEN == '' }}
+        run: echo "SONAR_TOKEN secret not set - skipping SonarQube scan."
+
+  # ---------------------------------------------------------------
+  # 2. Build image + security scans (image and IaC)
+  # ---------------------------------------------------------------
+  build-scan:
+    name: Build & Trivy scan
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t $IMAGE_NAME:${{ github.sha }} app
+
+      - name: Trivy - scan container image (fail on HIGH/CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:${TRIVY_VERSION} image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            $IMAGE_NAME:${{ github.sha }}
+
+      - name: Trivy - scan Terraform and Kubernetes manifests
+        run: |
+          docker run --rm -v "$PWD:/src" aquasec/trivy:${TRIVY_VERSION} config \
+            --severity HIGH,CRITICAL --exit-code 0 /src
+
+  # ---------------------------------------------------------------
+  # 3. Push to ECR and Blue/Green deploy to EKS
+  #    Runs only on main, and only once you set the repo variable
+  #    DEPLOY_ENABLED=true (after `terraform apply`).
+  # ---------------------------------------------------------------
+  deploy:
+    name: Blue/Green deploy to EKS
+    needs: build-scan
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # for AWS OIDC
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+      CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'cloud-native-cicd-eks' }}
+      ECR_REPO: ${{ vars.ECR_REPO || 'cloud-native-cicd-app' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPO}:${{ github.sha }}"
+          docker build -t "$IMAGE" app
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Connect kubectl to EKS
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+      - name: Blue/Green release
+        run: bash scripts/blue-green-deploy.sh "${{ steps.image.outputs.uri }}" "${GITHUB_SHA::7}"
