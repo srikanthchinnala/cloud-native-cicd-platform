@@ -1,0 +1,26 @@
+# Values for prometheus-community/kube-prometheus-stack
+# helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring -f monitoring/values.yaml
+
+grafana:
+  adminPassword: change-me # override with --set grafana.adminPassword=...
+  service:
+    type: ClusterIP # use: kubectl port-forward svc/monitoring-grafana 3000:80 -n monitoring
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          folder: Demo
+          type: file
+          options:
+            path: /var/lib/grafana/dashboards/default
+  dashboardsConfigMaps:
+    default: demo-app-dashboard
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    serviceMonitorSelectorNilUsesHelmValues: false
+
+alertmanager:
+  enabled: false
