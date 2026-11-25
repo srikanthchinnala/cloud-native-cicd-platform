@@ -1,0 +1,5 @@
+project_name        = "cloud-native-cicd"
+region              = "eu-west-2"
+node_instance_types = ["t3.medium"]
+node_desired_size   = 2
+github_repo         = "srikanthchinnala/cloud-native-cicd-platform"
