@@ -1,0 +1,35 @@
+# Public service. Its `color` selector decides which slot gets live traffic.
+# The pipeline patches this selector to switch Blue <-> Green.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  namespace: demo
+  labels:
+    app: demo-app
+spec:
+  type: LoadBalancer
+  selector:
+    app: demo-app
+    color: blue
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Internal service that always points at both slots, so Prometheus scrapes every pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-metrics
+  namespace: demo
+  labels:
+    app: demo-app
+    monitoring: "true"
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
